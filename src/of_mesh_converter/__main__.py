@@ -18,7 +18,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Convert a finished Fluent flow solution exported to CGNS "
             "into the minimum OpenFOAM case skeleton needed by the "
-            "photoBio radiationDose Lagrangian tracker."
+            "of-optical-radiation radiationDose Lagrangian tracker."
         ),
     )
     p.add_argument(

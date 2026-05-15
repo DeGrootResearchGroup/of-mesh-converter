@@ -19,7 +19,7 @@ pip install -e ..[dev]    # from this repo's root
 You **do not** need OpenFOAM installed to run the tutorials — they
 produce OF-format files and stop there. To actually run
 `radiationDose` on the output you also need the sibling
-[photoBio](https://github.com/DeGrootResearchGroup/photoBio) repo and
+[of-optical-radiation](https://github.com/DeGrootResearchGroup/of-optical-radiation) repo and
 an OpenFOAM 13 install.
 
 ## Walkthroughs

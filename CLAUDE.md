@@ -32,7 +32,7 @@
 A standalone CLI tool that converts a finished ANSYS Fluent flow
 solution (exported to CGNS) into the minimum set of OpenFOAM case
 artefacts needed to drive the `radiationDose` Lagrangian tracker from
-the sibling [photoBio](https://github.com/DeGrootResearchGroup/photoBio)
+the sibling [of-optical-radiation](https://github.com/DeGrootResearchGroup/of-optical-radiation)
 project.
 
 The tool is deliberately scoped narrow: it is **not** a general-purpose
@@ -42,9 +42,9 @@ type, turbulence model, and field name we map is one we can justify by
 (see "Strategic context" below), not a vendor-bridging product.
 
 This project has **no compile-time or runtime dependency on the
-photoBio repository.** The output it produces is a normal OpenFOAM
+of-optical-radiation repository.** The output it produces is a normal OpenFOAM
 case directory that any OF13 install can read; we validate against
-photoBio's `radiationDose` because that's the driver case we care
+of-optical-radiation's `radiationDose` because that's the driver case we care
 about, not because the tools are coupled.
 
 ## Strategic context
@@ -100,7 +100,7 @@ of weight:
 1. CGNS parsing in C++ is a fight (the CGNS Mid-Level Library has a
    C API, the obvious wrappers are dormant — see "Prior art" below).
    In Python it's `pycgns` + `h5py`.
-2. Keeping CGNS / HDF5 out of the photoBio C++ library build means
+2. Keeping CGNS / HDF5 out of the of-optical-radiation C++ library build means
    users who haven't built `libopticalRadiation` or `libradiationDose`
    yet can still try this converter on a Fluent result — which is the
    whole adoption pitch. The OpenFOAM mesh format is plain text, so
@@ -127,7 +127,7 @@ of-mesh-converter/
   tests/
     test_elements.py              # connectivity tables vs CGNS spec
     test_field_mapping.py         # name mapping round-trip
-    test_self_roundtrip.py        # photoBio doseSmokeBox → CGNS → back
+    test_self_roundtrip.py        # of-optical-radiation doseSmokeBox → CGNS → back
     test_synthetic_fluent.py      # hand-built CGNS matching Fluent layout
     fixtures/
       doseSmokeBox.cgns           # generated, gitignored if large
@@ -254,9 +254,9 @@ Three tiers, in order of fidelity. CI runs only tier 1; tiers 2 and
 
 ### Tier 1 — self-roundtrip (CI)
 
-Take `tests/doseSmokeBox` from the photoBio repo (1 m × 0.1 m × 0.1 m
+Take `tests/doseSmokeBox` from the of-optical-radiation repo (1 m × 0.1 m × 0.1 m
 slip-wall box with uniform `U = (0.5, 0, 0)`, deterministic 2.0
-mJ/cm² dose for every particle — see the photoBio CLAUDE.md). Export
+mJ/cm² dose for every particle — see the of-optical-radiation CLAUDE.md). Export
 it to CGNS via either `foamToCGNS` (if available on the user's
 install) or a hand-written conversion script. Run `of-mesh-converter`
 on the CGNS file. Assert:
@@ -291,7 +291,7 @@ real exports the engineer can provide.
 Partner with a Fluent user (the engineer driving this scoping
 exercise is a candidate) to solve `tutorials/uvReactorSozzi2006`'s
 geometry in Fluent, export to CGNS, run `of-mesh-converter` +
-`radiationDose`, document the deviation vs the photoBio-native
+`radiationDose`, document the deviation vs the of-optical-radiation-native
 answer (mean dose 70.28 mJ/cm² analytical, 64.45 mJ/cm² DOM-driven;
 log reduction at `kInact = 0.1 cm²/mJ` = 2.05 / 1.39 respectively).
 
@@ -318,7 +318,7 @@ CI; depends on Fluent licence access and partner availability.
   README. Don't promise what we can't validate.
 - **Fluent licence dependency for tier 2 / 3 validation.** The
   in-house team doesn't have one. Mitigation: build tier 1 on the
-  bit-for-bit photoBio roundtrip so CI carries the load; lean on
+  bit-for-bit of-optical-radiation roundtrip so CI carries the load; lean on
   external partners for the real-Fluent tiers.
 
 ## Effort estimate
@@ -341,7 +341,7 @@ to external users, and is partner-dependent.
 Code review goes through GitHub PRs against `main`. The Claude Code
 sandbox doesn't have an SSH key for `git@github.com:DeGrootResearchGroup/...`
 and `gh` isn't installed, so Claude can't push branches or open PRs
-directly. The convention (lifted from the sibling photoBio repo) is:
+directly. The convention (lifted from the sibling of-optical-radiation repo) is:
 
 1. Claude commits changes on a sensibly-named local branch (e.g.
    `add-<feature>`, `fix-<thing>`, `<area>-<change>`) — never on
@@ -384,22 +384,22 @@ New features must always be shipped with tests in `tests/`. Bug
 fixes that change observable behaviour need a regression test that
 would have failed before the fix.
 
-## Relationship to photoBio
+## Relationship to of-optical-radiation
 
 Sibling project. No code dependency in either direction. The link
 is:
 
-- This tool's tier 1 validation reads a test case from the photoBio
+- This tool's tier 1 validation reads a test case from the of-optical-radiation
   repo (`tests/doseSmokeBox`) and rounds it through CGNS. If
-  photoBio's `doseSmokeBox` changes shape, the validation case needs
+  of-optical-radiation's `doseSmokeBox` changes shape, the validation case needs
   re-exporting — but the converter itself doesn't break.
 - Users who want to chain Fluent → `of-mesh-converter` →
   `radiationDose` need both repos installed. The README should
   document this end-to-end pipeline as the main use case.
-- If photoBio's `radiationDose` input contract changes (e.g. a new
+- If of-optical-radiation's `radiationDose` input contract changes (e.g. a new
   required field), the `postProcess.dict` template emitted by
   step 6 needs updating. Catch this in CI by depending on the
-  photoBio repo for the validation case, not by trying to mirror
+  of-optical-radiation repo for the validation case, not by trying to mirror
   its dictionary schema.
 
 ## Open questions
@@ -439,6 +439,6 @@ about before writing code.
   reference only, do not port. Useful for the dictionary-driven
   field-mapping pattern and the standard-element connectivity
   tables. Last touched July 2018.
-- [photoBio repository](https://github.com/DeGrootResearchGroup/photoBio)
+- [of-optical-radiation repository](https://github.com/DeGrootResearchGroup/of-optical-radiation)
   — sibling project hosting `radiationDose`, the driver use case.
   See its `CLAUDE.md` for the dose tracker's input contract.

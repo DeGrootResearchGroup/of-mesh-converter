@@ -16,9 +16,9 @@ boundary patches:
 Field state inside the box: uniform `U = (0.5, 0, 0)` m/s,
 `k = 1e-3` m²/s², `ε = 1e-4` m²/s³ — a contrived but
 dimensionally-consistent low-turbulence plug-flow snapshot. The
-geometry and field set deliberately mirror `photoBio`'s
+geometry and field set deliberately mirror `of-optical-radiation`'s
 `tests/doseSmokeBox` so you can chain this tutorial into
-`radiationDose` if you have OpenFOAM 13 + photoBio installed.
+`radiationDose` if you have OpenFOAM 13 + of-optical-radiation installed.
 
 ## Run it
 
@@ -57,7 +57,7 @@ Both `case_out.cgns` and `case_out/` are `.gitignore`d.
 ## Chain into radiationDose (optional)
 
 If you have OpenFOAM 13 and the
-[photoBio](https://github.com/DeGrootResearchGroup/photoBio)
+[of-optical-radiation](https://github.com/DeGrootResearchGroup/of-optical-radiation)
 library compiled, you can run the dose tracker on this output:
 
 ```bash
