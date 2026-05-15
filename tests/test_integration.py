@@ -3,7 +3,7 @@ written OpenFOAM case directory.
 
 These exercise reader + sanitise + mesh builder + writer together.
 They are the v1 stand-in for the "tier 1 self-roundtrip" validation
-described in CLAUDE.md — the photoBio bit-for-bit roundtrip is a
+described in CLAUDE.md — the of-optical-radiation bit-for-bit roundtrip is a
 separate, partner-dependent harness that lives outside CI.
 """
 

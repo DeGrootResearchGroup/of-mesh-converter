@@ -3,7 +3,7 @@
 Convert a finished ANSYS Fluent flow solution exported to CGNS into the
 minimum OpenFOAM case skeleton needed to drive the `radiationDose`
 Lagrangian tracker from the sibling
-[photoBio](https://github.com/DeGrootResearchGroup/photoBio) project.
+[of-optical-radiation](https://github.com/DeGrootResearchGroup/of-optical-radiation) project.
 
 This is **not** a general-purpose Fluent → OpenFOAM converter. Every
 boundary-condition type, turbulence model, and field name it knows
@@ -137,7 +137,7 @@ pytest
 New features must always be shipped with tests; see CLAUDE.md
 "Development workflow".
 
-## Relationship to photoBio
+## Relationship to of-optical-radiation
 
 Sibling project, no code dependency in either direction. The chain
 is:
@@ -153,9 +153,9 @@ radiationDose results
 ```
 
 Users who want the full pipeline need both this repo and
-[photoBio](https://github.com/DeGrootResearchGroup/photoBio)
+[of-optical-radiation](https://github.com/DeGrootResearchGroup/of-optical-radiation)
 installed. The dose-tracker side of the chain is documented in
-photoBio's README and CLAUDE.md.
+of-optical-radiation's README and CLAUDE.md.
 
 ## License
 
