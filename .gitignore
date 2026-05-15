@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# Generated CGNS fixtures and OF cases
+tests/fixtures/*.cgns
+tests/fixtures/*.case/
+tutorials/**/case_out/
+tutorials/**/case_out
+
+# Build artefacts from local tutorial runs
+tutorials/**/*.cgns

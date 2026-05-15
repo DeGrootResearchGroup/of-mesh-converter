@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "of-mesh-converter"
+version = "0.1.0"
+description = "Convert a Fluent CGNS flow solution to an OpenFOAM case skeleton for the radiationDose Lagrangian tracker."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "DeGroot Research Group" }
+]
+keywords = ["openfoam", "cgns", "fluent", "mesh", "converter", "radiationDose"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=1.24",
+    "h5py>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+of-mesh-converter = "of_mesh_converter.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/DeGrootResearchGroup/of-mesh-converter"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
