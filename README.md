@@ -14,9 +14,14 @@ already validated."
 
 ## Status
 
-v1, in active development. Works on synthetic Fluent-layout CGNS in
-the CI test suite; not yet validated against a real Fluent export
-(tier 2 / tier 3 validation is partner-dependent — see CLAUDE.md).
+v1, in active development. CI runs on synthetic CGNS, including a
+polyhedral file in the layout Fluent writes. One real Fluent export
+has been converted and checked: the Sozzi & Taghipour reactor on a
+1.23M-cell polyhedral mesh (DO incident radiation only, no flow),
+which `checkMesh` passes and whose cells match the OpenFOAM mesh it
+was made from to within 1 nm. That export carried no `U`, `k` or
+`epsilon`, so the flow-field path is still untested on real Fluent
+output (see CLAUDE.md "Validation").
 
 ## Quick start
 
@@ -65,18 +70,37 @@ foamPostProcess -dict system/postProcess.dict -latestTime
 ## Inputs the converter understands
 
 - **Mesh**: a single CGNS file with one `CGNSBase_t` and one
-  unstructured `Zone_t`. Linear standard elements only: `TETRA_4`,
-  `HEXA_8`, `PENTA_6` (wedge), `PYRA_5` (pyramid). Polyhedral
-  (`NGON_n` / `NFACE_n`) is **not yet supported** — the reader
-  raises a clear `NotImplementedError`; polyhedra are the main v2
-  work item (see CLAUDE.md "Open questions").
+  unstructured `Zone_t`, holding either
+  - polyhedral cells: `NGON_n` faces plus `NFACE_n` cells, which is
+    what Fluent writes for poly and poly-hex meshes. Both the CGNS
+    4.x layout (`ElementStartOffset`) and the CGNS 3.x layout
+    (length-prefixed entries) are read; or
+  - linear standard elements: `TETRA_4`, `HEXA_8`, `PENTA_6`
+    (wedge), `PYRA_5` (pyramid), with `TRI_3` / `QUAD_4` boundary
+    sections.
+
+  A zone mixing the two is rejected.
 - **Boundary conditions**: each CGNS `BC_t` becomes one OpenFOAM
   patch. `BCWall*` types become OF `wall` patches; everything else
   becomes a generic `patch`. The dose tracker only reads patch
   *names* (for `escapePatches`, `seedingPatches`), so BC type
-  fidelity beyond `wall` vs `patch` is not load-bearing.
+  fidelity beyond `wall` vs `patch` is not load-bearing. A BC's
+  name is its `FamilyName` if it has one; Fluent writes none and
+  names BCs `<zone>-<zone type>` (`lamp0_wall-wall`), so the
+  converter takes the zone name from the BC's face section
+  (`lamp0_wall-Pg`) instead. Fluent lower-cases zone names on
+  export, which the converter cannot undo.
+- **Mesh interfaces**: Fluent exports interface zones (non-conformal
+  seams) as `BCWall`. They become uncoupled patches, and the report
+  lists them: couple them in OpenFOAM before tracking on the
+  converted mesh, or map the fields onto a coupled OpenFOAM case.
 - **Fields**: cell-centred `VelocityX/Y/Z`, `TurbulentEnergyKinetic`,
-  `TurbulentDissipationRate`, optional `FluenceRate` or `G`.
+  `TurbulentDissipationRate`, optional `Incident_Radiation`
+  (Fluent's DO / P1 name), `FluenceRate` or `G`, all mapped to OF
+  `U`, `k`, `epsilon`, `G`. Fluent sizes solution arrays by the
+  zone's element count (faces plus cells) and indexes them by
+  element id; the reader takes the cell slice and says so in the
+  report. Arrays with one value per cell are read as they are.
   Anything else in the `FlowSolution_t` is ignored. Turbulence
   models other than k-ε (k-ω SST, RSM, ...) export different
   fields and are currently rejected — `radiationDose`'s

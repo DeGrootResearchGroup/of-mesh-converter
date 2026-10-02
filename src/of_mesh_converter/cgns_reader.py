@@ -6,16 +6,27 @@ holds:
 
 - ``GridCoordinates_t`` with ``CoordinateX``, ``CoordinateY``,
   ``CoordinateZ`` (one ``DataArray_t`` each).
-- One or more ``Elements_t`` sections. The volume sections give us
-  cells (``TETRA_4``, ``HEXA_8``, ``PYRA_5``, ``PENTA_6``); the
-  surface sections (``TRI_3``, ``QUAD_4``) give us boundary patches.
-  Each ``Elements_t`` node carries:
+- One or more ``Elements_t`` sections, either standard or polyhedral.
+
+  Standard: the volume sections give us cells (``TETRA_4``,
+  ``HEXA_8``, ``PYRA_5``, ``PENTA_6``); the surface sections
+  (``TRI_3``, ``QUAD_4``) give us boundary patches. Each
+  ``Elements_t`` node carries:
 
     * ``data``: ``[element_type_code, parent_flag]`` (CGNS convention).
     * child ``ElementRange``: ``[first_elem, last_elem]`` (1-based,
       inclusive — CGNS-canonical).
     * child ``ElementConnectivity``: flattened vertex indices, all
       1-based. Length is ``(last_elem - first_elem + 1) * N_VERTS``.
+
+  Polyhedral (what Fluent writes for poly and poly-hex meshes):
+  ``NGON_n`` sections list faces, ``NFACE_n`` sections list each
+  cell's faces as signed ``NGON_n`` element ids (positive: the face
+  normal points out of the cell). Both use ``ElementStartOffset``
+  (CGNS 4.x); the CGNS 3.x layout, where each entry is prefixed by
+  its length, is accepted too. Fluent puts every face in an
+  ``NGON_n`` section — one per boundary zone plus one for the
+  interior — and every cell in one ``NFACE_n`` section.
 
 - ``ZoneBC_t`` containing ``BC_t`` children. Each ``BC_t`` is one
   patch; it carries a ``GridLocation_t`` (``FaceCenter`` for a
@@ -26,14 +37,18 @@ holds:
   correct boundary-element rows out of the surface ``Elements_t``
   sections.
 
-The reader produces ``(CellBlock list, BoundaryFaceGroup list,
-points, FlowSolution dict)`` and hands them to ``mesh_builder`` and
-the field-mapping layer. It does not build the mesh or write
-anything.
+- One ``FlowSolution_t`` with ``GridLocation = CellCenter``. Fluent
+  sizes these arrays by the zone's *element* count (faces plus
+  cells) and indexes them by element id, so the cell values are the
+  slice at the volume sections' element ids; boundary-face values
+  sit at the face ids and interior faces are zero. The reader
+  accepts either that layout or one value per cell.
 
-Polyhedral cells (``NGON_n`` / ``NFACE_n``) are flagged with a
-``NotImplementedError`` for v1. Adding them is a follow-up in this
-same file.
+The reader produces ``(points, cells, BoundaryFaceGroup list,
+FlowSolution dict)`` — ``cells`` is a ``CellBlock`` list for standard
+elements or a ``PolyhedralCells`` for ``NGON_n`` / ``NFACE_n`` — and
+hands them to ``mesh_builder`` and the field-mapping layer. It does
+not build the mesh or write anything.
 """
 
 from __future__ import annotations
@@ -51,7 +66,7 @@ from .elements import (
     SUPPORTED_BOUNDARY_ELEMENTS,
     SUPPORTED_VOLUME_ELEMENTS,
 )
-from .mesh_builder import BoundaryFaceGroup, CellBlock
+from .mesh_builder import BoundaryFaceGroup, CellBlock, PolyhedralCells
 
 
 def _expect_int(arr: np.ndarray, name: str) -> np.ndarray:
@@ -131,11 +146,19 @@ def _read_elements_node(elem: CGNSNode):
     flat = _expect_int(conn_node.data, f"{elem.name}.ElementConnectivity").ravel()
 
     if type_name in ("NGON_n", "NFACE_n"):
-        raise NotImplementedError(
-            f"Elements_t {elem.name!r} is polyhedral ({type_name}). "
-            "Polyhedral CGNS support is planned but not yet implemented; "
-            "v1 supports TETRA_4, HEXA_8, PENTA_6, PYRA_5 only."
-        )
+        offsets, flat = _poly_offsets(elem, flat, n_elements)
+        if offsets.size != n_elements + 1 or offsets[-1] != flat.size:
+            raise ValueError(
+                f"Elements_t {elem.name!r}: ElementStartOffset has "
+                f"{offsets.size} entries ending at {offsets[-1]}; expected "
+                f"{n_elements + 1} ending at {flat.size}"
+            )
+        if offsets[0] != 0 or np.any(np.diff(offsets) < 1):
+            raise ValueError(
+                f"Elements_t {elem.name!r}: ElementStartOffset must start "
+                "at 0 and increase strictly"
+            )
+        return type_name, first, last, (offsets, flat)
 
     if type_name not in N_VERTS:
         raise NotImplementedError(
@@ -156,10 +179,57 @@ def _read_elements_node(elem: CGNSNode):
     return type_name, first, last, conn
 
 
-def _read_flow_solution(zone: CGNSNode, n_cells: int) -> dict[str, np.ndarray]:
+def _poly_offsets(
+    elem: CGNSNode, flat: np.ndarray, n_elements: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(ElementStartOffset, connectivity)`` for an
+    ``NGON_n`` / ``NFACE_n`` section. A CGNS 3.x section has no
+    ``ElementStartOffset``; its connectivity carries each element's
+    length in front of it, which is stripped here."""
+    off_node = elem.child("ElementStartOffset")
+    if off_node is not None and off_node.data is not None:
+        offsets = _expect_int(off_node.data, f"{elem.name}.ElementStartOffset")
+        return offsets.ravel(), flat
+
+    # CGNS 3.x: [n0, v..., n1, v..., ...].
+    lengths = np.empty(n_elements, dtype=np.int64)
+    pos = 0
+    for i in range(n_elements):
+        if pos >= flat.size:
+            raise ValueError(
+                f"Elements_t {elem.name!r}: connectivity ends after "
+                f"{i} of {n_elements} elements"
+            )
+        lengths[i] = flat[pos]
+        pos += 1 + int(flat[pos])
+    if pos != flat.size:
+        raise ValueError(
+            f"Elements_t {elem.name!r}: {flat.size - pos} trailing "
+            "connectivity entries"
+        )
+    heads = np.zeros(n_elements, dtype=np.int64)
+    np.cumsum(lengths[:-1] + 1, out=heads[1:])
+    keep = np.ones(flat.size, dtype=bool)
+    keep[heads] = False
+    offsets = np.zeros(n_elements + 1, dtype=np.int64)
+    np.cumsum(lengths, out=offsets[1:])
+    return offsets, flat[keep]
+
+
+def _read_flow_solution(
+    zone: CGNSNode,
+    n_cells: int,
+    cell_ranges: list[tuple[int, int]],
+    n_elements: int,
+    notes: list[str],
+) -> dict[str, np.ndarray]:
     """Return a {OF-field-name: array} dict. Scalars: (n_cells,);
     vectors: (n_cells, 3). Cell-centred fields only — node-centred
-    fields would need an interpolation step that's out of scope."""
+    fields would need an interpolation step that's out of scope.
+
+    ``cell_ranges`` are the ``(first, last)`` element ids of the volume
+    sections, in cell order, and ``n_elements`` the zone's total
+    element count: arrays of that length are indexed by element id."""
     fs_nodes = zone.children_of_label("FlowSolution_t")
     if not fs_nodes:
         return {}
@@ -181,16 +251,28 @@ def _read_flow_solution(zone: CGNSNode, n_cells: int) -> dict[str, np.ndarray]:
             )
 
     cgns_arrays: dict[str, np.ndarray] = {}
+    by_element_id = False
     for da in fs.children_of_label("DataArray_t"):
         if da.data is None:
             continue
         arr = np.asarray(da.data, dtype=np.float64).ravel()
-        if arr.shape[0] != n_cells:
+        if arr.shape[0] == n_cells:
+            pass
+        elif arr.shape[0] == n_elements:
+            arr = np.concatenate([arr[f - 1:l] for f, l in cell_ranges])
+            by_element_id = True
+        else:
             raise ValueError(
                 f"FlowSolution/{da.name}: {arr.shape[0]} values does "
-                f"not match {n_cells} cells"
+                f"not match {n_cells} cells (or {n_elements} elements)"
             )
         cgns_arrays[da.name] = arr
+    if by_element_id:
+        notes.append(
+            f"FlowSolution arrays have one value per element ({n_elements}) "
+            f"rather than per cell ({n_cells}), as Fluent writes them; "
+            "cell values were taken at the volume sections' element ids."
+        )
 
     scalars: dict[str, np.ndarray] = {}
     vectors: dict[str, np.ndarray] = {}
@@ -214,9 +296,95 @@ def _read_flow_solution(zone: CGNSNode, n_cells: int) -> dict[str, np.ndarray]:
     return {"scalars": scalars, "vectors": vectors}
 
 
+def _bc_element_ids(bc: CGNSNode) -> np.ndarray:
+    pr = bc.child("PointRange")
+    pl = bc.child("PointList")
+    if pr is not None and pr.data is not None:
+        rng = _expect_int(pr.data, "PointRange").ravel()
+        return np.arange(int(rng[0]), int(rng[1]) + 1, dtype=np.int64)
+    if pl is not None and pl.data is not None:
+        return _expect_int(pl.data, "PointList").ravel()
+    raise ValueError(f"BC_t {bc.name!r} has neither PointRange nor PointList")
+
+
+def _bc_name_and_type(
+    bc: CGNSNode,
+    element_ids: np.ndarray,
+    sections: list[tuple[str, int, int]],
+) -> tuple[str, str]:
+    """Patch name and OF patch type for one BC_t.
+
+    The name is the BC's FamilyName if it has one. Otherwise it is the
+    BC_t node's name, except that Fluent names a BC
+    ``<zone>-<zone type>`` (``lamp0_wall-wall``, ``inlet-velocity-inlet``)
+    and its face section ``<zone>-<suffix>`` (``lamp0_wall-Pg``): when
+    the BC covers exactly one section whose stem prefixes the BC name
+    that way, the stem is used. ``sections`` holds ``(name, first,
+    last)`` for every Elements_t section."""
+    bc_type_str = bc.data_as_str() or ""
+    of_type = "wall" if "Wall" in bc_type_str else "patch"
+    family_node = bc.child("FamilyName") or next(
+        (c for c in bc.children_of_label("FamilyName_t")), None
+    )
+    family = family_node.data_as_str() if family_node else None
+    if family:
+        return family, of_type
+    if element_ids.size:
+        lo, hi = int(element_ids.min()), int(element_ids.max())
+        for sec_name, first, last in sections:
+            if (first, last) != (lo, hi) or element_ids.size != last - first + 1:
+                continue
+            stem = sec_name.rsplit("-", 1)[0]
+            if "-" in sec_name and bc.name.startswith(stem + "-"):
+                return stem, of_type
+    return bc.name, of_type
+
+
+def _note_fluent_interfaces(bc_names: list[str], notes: list[str]) -> None:
+    interfaces = [n for n in bc_names if n.endswith("-interface")]
+    if interfaces:
+        notes.append(
+            f"{len(interfaces)} BC(s) are Fluent mesh interfaces "
+            f"({', '.join(interfaces)}). They are written as ordinary "
+            "patches with no coupling across them, so the tracker would "
+            "stop or reflect particles there. Couple them in OpenFOAM "
+            "(createNonConformalCouples) before tracking on this mesh, "
+            "or map these fields onto a coupled OpenFOAM case."
+        )
+
+
+def _read_polyhedral_boundary_groups(
+    zone: CGNSNode,
+    elem_to_face: np.ndarray,
+    sections: list[tuple[str, int, int]],
+) -> list[BoundaryFaceGroup]:
+    """Translate each BC_t into a BoundaryFaceGroup of face indices.
+    ``elem_to_face`` maps a CGNS element id to its index in the
+    concatenated ``NGON_n`` face list (-1 if not a face)."""
+    zbc_nodes = zone.children_of_label("ZoneBC_t")
+    if not zbc_nodes:
+        return []
+    groups: list[BoundaryFaceGroup] = []
+    for bc in zbc_nodes[0].children_of_label("BC_t"):
+        eids = _bc_element_ids(bc)
+        name, of_type = _bc_name_and_type(bc, eids, sections)
+        bad = (eids < 1) | (eids >= elem_to_face.size)
+        if not np.any(bad):
+            face_ids = elem_to_face[eids]
+            bad = face_ids < 0
+        if np.any(bad):
+            raise ValueError(
+                f"BC_t {bc.name!r}: element id {int(eids[bad][0])} is not "
+                "an NGON_n face"
+            )
+        groups.append(BoundaryFaceGroup(name=name, type=of_type, face_ids=face_ids))
+    return groups
+
+
 def _read_boundary_groups(
     zone: CGNSNode,
     surface_elems: list[tuple[str, int, int, np.ndarray]],
+    sections: list[tuple[str, int, int]],
 ) -> list[BoundaryFaceGroup]:
     """Read ZoneBC_t and translate each BC_t into a BoundaryFaceGroup.
 
@@ -247,27 +415,9 @@ def _read_boundary_groups(
 
     groups: list[BoundaryFaceGroup] = []
     for bc in zbc.children_of_label("BC_t"):
-        family_node = bc.child("FamilyName") or next(
-            (c for c in bc.children_of_label("FamilyName_t")), None
-        )
-        family = family_node.data_as_str() if family_node else None
-        patch_name = family or bc.name
-
-        bc_type_str = bc.data_as_str() or ""
-        of_type = "wall" if "Wall" in bc_type_str else "patch"
-
-        pr = bc.child("PointRange")
-        pl = bc.child("PointList")
-        elem_ids: list[int] = []
-        if pr is not None and pr.data is not None:
-            rng = _expect_int(pr.data, "PointRange").ravel()
-            elem_ids = list(range(int(rng[0]), int(rng[1]) + 1))
-        elif pl is not None and pl.data is not None:
-            elem_ids = [int(x) for x in _expect_int(pl.data, "PointList").ravel()]
-        else:
-            raise ValueError(
-                f"BC_t {bc.name!r} has neither PointRange nor PointList"
-            )
+        eids = _bc_element_ids(bc)
+        patch_name, of_type = _bc_name_and_type(bc, eids, sections)
+        elem_ids = eids.tolist()
 
         faces = []
         for eid in elem_ids:
@@ -283,25 +433,97 @@ def _read_boundary_groups(
     return groups
 
 
-def read_cgns(path: Path | str):
-    """Parse a CGNS file. Returns ``(points, cell_blocks,
-    boundary_groups, flow_solution)``.
+def _build_polyhedral_cells(
+    ngon_elems: list[tuple[str, int, int, tuple[np.ndarray, np.ndarray]]],
+    nface_elems: list[tuple[str, int, int, tuple[np.ndarray, np.ndarray]]],
+    n_points: int,
+) -> tuple[PolyhedralCells, np.ndarray]:
+    """Concatenate the NGON_n sections (in element-id order) into one
+    face list and resolve NFACE_n face references into it. Returns
+    the cells and the element-id -> face-index lookup."""
+    if not ngon_elems:
+        raise ValueError("Zone has NFACE_n cells but no NGON_n faces")
+    ngon_elems = sorted(ngon_elems, key=lambda e: e[1])
+    nface_elems = sorted(nface_elems, key=lambda e: e[1])
 
+    max_id = max(e[2] for e in ngon_elems + nface_elems)
+    elem_to_face = np.full(max_id + 1, -1, dtype=np.int64)
+    offsets_parts = []
+    vertex_parts = []
+    n_faces = 0
+    n_conn = 0
+    for _t, first, last, (offsets, flat) in ngon_elems:
+        elem_to_face[first:last + 1] = np.arange(n_faces, n_faces + last - first + 1)
+        offsets_parts.append(offsets[:-1] + n_conn)
+        vertex_parts.append(flat - 1)
+        n_faces += last - first + 1
+        n_conn += flat.size
+    face_offsets = np.concatenate(offsets_parts + [np.array([n_conn])])
+    face_vertices = np.concatenate(vertex_parts)
+    if face_vertices.size and (
+        face_vertices.min() < 0 or face_vertices.max() >= n_points
+    ):
+        raise ValueError("NGON_n references a vertex outside GridCoordinates")
+
+    cell_offsets_parts = []
+    cell_face_parts = []
+    n_ref = 0
+    for name, _first, _last, (offsets, flat) in nface_elems:
+        eid = np.abs(flat)
+        bad = (eid < 1) | (eid > max_id)
+        if not np.any(bad):
+            face_idx = elem_to_face[eid]
+            bad = face_idx < 0
+        if np.any(bad):
+            raise ValueError(
+                f"NFACE_n section {name!r} references element "
+                f"{int(flat[bad][0])}, which is not an NGON_n face"
+            )
+        cell_face_parts.append(np.sign(flat) * (face_idx + 1))
+        cell_offsets_parts.append(offsets[:-1] + n_ref)
+        n_ref += flat.size
+    cells = PolyhedralCells(
+        face_offsets=face_offsets,
+        face_vertices=face_vertices,
+        cell_offsets=np.concatenate(cell_offsets_parts + [np.array([n_ref])]),
+        cell_faces=np.concatenate(cell_face_parts),
+    )
+    return cells, elem_to_face
+
+
+def read_cgns(path: Path | str, notes: list[str] | None = None):
+    """Parse a CGNS file. Returns ``(points, cells, boundary_groups,
+    flow_solution)``.
+
+    ``cells`` is a list of ``CellBlock`` for standard elements, or a
+    ``PolyhedralCells`` for ``NGON_n`` / ``NFACE_n`` meshes.
     ``flow_solution`` is a dict with keys ``"scalars"`` (OF-name →
-    array) and ``"vectors"`` (OF-name → (n,3) array).
+    array) and ``"vectors"`` (OF-name → (n,3) array). Anything worth
+    telling the user about the input is appended to ``notes``.
     """
+    if notes is None:
+        notes = []
     root = read_cgns_file(path)
     zone = _find_zone(root)
 
     points = _read_points(zone)
 
-    # Walk every Elements_t in the zone, partitioning into volume and
-    # surface by element-type dimensionality.
+    # Walk every Elements_t in the zone, partitioning by kind.
     volume_elems: list[tuple[str, int, int, np.ndarray]] = []
     surface_elems: list[tuple[str, int, int, np.ndarray]] = []
+    ngon_elems: list = []
+    nface_elems: list = []
+    n_elements = 0
+    sections: list[tuple[str, int, int]] = []
     for elem in zone.children_of_label("Elements_t"):
         type_name, first, last, conn = _read_elements_node(elem)
-        if type_name in SUPPORTED_VOLUME_ELEMENTS:
+        n_elements = max(n_elements, last)
+        sections.append((elem.name, first, last))
+        if type_name == "NGON_n":
+            ngon_elems.append((type_name, first, last, conn))
+        elif type_name == "NFACE_n":
+            nface_elems.append((elem.name, first, last, conn))
+        elif type_name in SUPPORTED_VOLUME_ELEMENTS:
             volume_elems.append((type_name, first, last, conn))
         elif type_name in SUPPORTED_BOUNDARY_ELEMENTS:
             surface_elems.append((type_name, first, last, conn))
@@ -311,17 +533,40 @@ def read_cgns(path: Path | str):
                 "handled by the converter."
             )
 
-    if not volume_elems:
-        raise ValueError("Zone has no volume Elements_t sections")
+    if nface_elems:
+        if volume_elems or surface_elems:
+            raise NotImplementedError(
+                "Zone mixes NFACE_n polyhedra with standard elements; "
+                "re-export with all cells as polyhedra or none."
+            )
+        cells, elem_to_face = _build_polyhedral_cells(
+            ngon_elems, nface_elems, points.shape[0]
+        )
+        n_cells = cells.n_cells
+        cell_ranges = [(f, l) for (_n, f, l, _c) in sorted(nface_elems, key=lambda e: e[1])]
+        boundary_groups = _read_polyhedral_boundary_groups(zone, elem_to_face, sections)
+    else:
+        if ngon_elems:
+            raise NotImplementedError(
+                "Zone has NGON_n faces but no NFACE_n cells; face-only "
+                "polyhedral exports are not supported."
+            )
+        if not volume_elems:
+            raise ValueError("Zone has no volume Elements_t sections")
+        cells = [
+            CellBlock(element_type=t, connectivity=conn)
+            for (t, _f, _l, conn) in volume_elems
+        ]
+        n_cells = sum(b.connectivity.shape[0] for b in cells)
+        cell_ranges = [(f, l) for (_t, f, l, _c) in volume_elems]
+        boundary_groups = _read_boundary_groups(zone, surface_elems, sections)
 
-    cell_blocks = [
-        CellBlock(element_type=t, connectivity=conn)
-        for (t, _f, _l, conn) in volume_elems
-    ]
-    n_cells = sum(b.connectivity.shape[0] for b in cell_blocks)
+    zbc = zone.children_of_label("ZoneBC_t")
+    if zbc:
+        _note_fluent_interfaces(
+            [bc.name for bc in zbc[0].children_of_label("BC_t")], notes
+        )
 
-    boundary_groups = _read_boundary_groups(zone, surface_elems)
+    flow_solution = _read_flow_solution(zone, n_cells, cell_ranges, n_elements, notes)
 
-    flow_solution = _read_flow_solution(zone, n_cells)
-
-    return points, cell_blocks, boundary_groups, flow_solution
+    return points, cells, boundary_groups, flow_solution

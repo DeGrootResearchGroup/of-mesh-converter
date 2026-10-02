@@ -129,6 +129,7 @@ of-mesh-converter/
     test_field_mapping.py         # name mapping round-trip
     test_self_roundtrip.py        # of-optical-radiation doseSmokeBox → CGNS → back
     test_synthetic_fluent.py      # hand-built CGNS matching Fluent layout
+                                  #   (as built: test_polyhedral.py)
     fixtures/
       doseSmokeBox.cgns           # generated, gitignored if large
 ```
@@ -286,6 +287,33 @@ This is the test that proves we can read what Fluent actually emits,
 distinct from what the CGNS spec allows in theory. Build it from
 real exports the engineer can provide.
 
+`tests/cgns_fixture.py::poly_box_cgns` reproduces the layout of the
+first real export (below), on a small hex box, and
+`tests/test_polyhedral.py` checks it against the standard-element
+path. The plug-flow dose assertion is not there yet.
+
+**Fluent CGNS layout, as observed** (Sozzi on the uvmesh mesh, DO
+only, CGNS library 4.3, 2026-10-02):
+
+- One base, one unstructured zone. Every face is in an `NGON_n`
+  section with `ElementStartOffset`: one `<zone>-Pg` section per
+  boundary zone, then one `<cellzone>-IF` interior section; the
+  cells are one `NFACE_n` section `<cellzone>-Ph`. Element ids run
+  boundary faces, interior faces, cells.
+- `NFACE_n` signs: positive means the face's right-hand normal
+  points out of the cell. Every boundary face is referenced
+  positively; every interior face once with each sign.
+- `ZoneBC` holds one `BC_t` per boundary zone, named
+  `<zone>-<zone type>` (`inlet-velocity-inlet`, `lamp0_wall-wall`),
+  with a `PointList` of face element ids and no `FamilyName`. Zone
+  names are lower-cased. Interface zones are written as `BCWall`.
+- `Zone_t` gives the cell count as the total element count, and the
+  `FlowSolution_t` (`CellCenter`) arrays have that length, indexed
+  by element id: cell values at the `NFACE_n` ids, boundary-face
+  values at the boundary face ids, zeros for interior faces. The
+  solution also carries `CoordinateX/Y/Z` (cell centroids) and
+  `Cell_Volume`. DO incident radiation is `Incident_Radiation`.
+
 ### Tier 3 — Sozzi-in-Fluent
 
 Partner with a Fluent user (the engineer driving this scoping
@@ -302,10 +330,12 @@ CI; depends on Fluent licence access and partner availability.
 ## Risks
 
 - **CGNS polyhedral storage (`NGON_n` / `NFACE_n`) is less mature in
-  tooling than tet/hex.** Fluent emits it but the indexing
-  conventions deserve a careful read against the CGNS SIDS before
-  any code lands. Cross-check against at least one real Fluent
-  export before declaring the reader done.
+  tooling than tet/hex.** The reader follows the CGNS SIDS and has
+  been checked against one real Fluent export (Tier 2 above): the
+  converted 1.23M-cell mesh passes `checkMesh`, and its cells match
+  the OpenFOAM mesh Fluent was given to within 1 nm. More exports
+  (other Fluent versions, mixed poly/standard zones, multiple cell
+  zones) would still be worth collecting.
 - **Patch-name collisions.** Fluent zone names like `interior-fluid`
   contain characters OF won't accept. We need a documented
   sanitisation rule (e.g. `[^a-zA-Z0-9_]` → `_`, leading-digit

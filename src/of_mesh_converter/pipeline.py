@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import cgns_reader, foam_writer, sanitise, sanity_report
-from .mesh_builder import build_mesh
+from .mesh_builder import PolyhedralCells, build_mesh, build_polyhedral_mesh
 from .mesh_ir import CaseData
 
 
@@ -30,8 +30,9 @@ def convert(
     cgns_path = Path(cgns_path)
     out_dir = Path(out_dir)
 
-    points, cell_blocks, boundary_groups, flow_solution = cgns_reader.read_cgns(
-        cgns_path
+    notes: list[str] = []
+    points, cells, boundary_groups, flow_solution = cgns_reader.read_cgns(
+        cgns_path, notes
     )
 
     # 1. Sanitise patch names and resolve collisions before the
@@ -42,8 +43,11 @@ def convert(
     for group, new_name in zip(boundary_groups, sanitised):
         group.name = new_name
 
-    # 2. Build the face-based mesh from cell-vertex CGNS input.
-    mesh = build_mesh(points, cell_blocks, boundary_groups)
+    # 2. Build the face-based mesh.
+    if isinstance(cells, PolyhedralCells):
+        mesh = build_polyhedral_mesh(points, cells, boundary_groups)
+    else:
+        mesh = build_mesh(points, cells, boundary_groups)
 
     # 3. Assemble fields and run turbulence-floor clipping.
     scalars = dict(flow_solution.get("scalars", {}))
@@ -55,7 +59,12 @@ def convert(
     if "epsilon" in scalars:
         scalars["epsilon"], n_clip_eps = sanitise.clip_nonpositive(scalars["epsilon"])
 
-    notes: list[str] = []
+    if "U" not in vectors:
+        notes.append(
+            "U missing from FlowSolution — radiationDose needs a velocity "
+            "field. Map these fields onto an OpenFOAM flow case on the "
+            "same geometry, or supply U in 0/ yourself."
+        )
     if "k" not in scalars or "epsilon" not in scalars:
         notes.append(
             "k or epsilon missing from FlowSolution — "

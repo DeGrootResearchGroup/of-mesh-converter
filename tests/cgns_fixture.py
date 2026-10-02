@@ -383,3 +383,189 @@ def hex_box_cgns(
         "k_val": k_val,
         "eps_val": eps_val,
     }
+
+
+def _poly_elements_node(
+    name: str,
+    type_name: str,
+    first: int,
+    entries: list[list[int]],
+    *,
+    legacy: bool,
+) -> CGNSNode:
+    """One NGON_n / NFACE_n section. ``entries`` are 1-based (signed for
+    NFACE_n). ``legacy`` writes the CGNS 3.x layout (each entry
+    prefixed by its length, no ElementStartOffset)."""
+    last = first + len(entries) - 1
+    children = [
+        CGNSNode(
+            name="ElementRange",
+            label="IndexRange_t",
+            data=np.array([first, last], dtype=np.int64),
+        )
+    ]
+    if legacy:
+        flat = [x for e in entries for x in [len(e), *e]]
+    else:
+        flat = [x for e in entries for x in e]
+        offsets = np.zeros(len(entries) + 1, dtype=np.int64)
+        np.cumsum([len(e) for e in entries], out=offsets[1:])
+        children.append(
+            CGNSNode(name="ElementStartOffset", label="DataArray_t", data=offsets)
+        )
+    children.append(
+        CGNSNode(
+            name="ElementConnectivity",
+            label="DataArray_t",
+            data=np.array(flat, dtype=np.int64),
+        )
+    )
+    return CGNSNode(
+        name=name,
+        label="Elements_t",
+        data=np.array([ELEMENT_TYPE_CODES[type_name], 0], dtype=np.int32),
+        children=children,
+    )
+
+
+def poly_box_cgns(
+    out_path: Path,
+    *,
+    nx: int = 3,
+    ny: int = 2,
+    nz: int = 2,
+    Lx: float = 1.0,
+    Ly: float = 0.1,
+    Lz: float = 0.1,
+    legacy: bool = False,
+    bc_suffixes: dict[str, str] | None = None,
+) -> dict:
+    """Write the ``hex_box_cgns`` geometry as Fluent writes a polyhedral
+    mesh: NGON_n faces in one ``<zone>-Pg`` section per boundary zone
+    plus an interior section, NFACE_n cells in one ``fluid-Ph``
+    section, BC_t nodes named ``<zone>-<zone type>`` with PointLists
+    and no FamilyName, and FlowSolution arrays sized by the total
+    element count and indexed by element id.
+
+    Every third face is stored with reversed vertex order (and its
+    NFACE_n signs flipped to match) so the builder's reorientation is
+    exercised; boundary faces among them end up referenced with a
+    negative sign. Returns the Python-side ground truth."""
+    if bc_suffixes is None:
+        bc_suffixes = {"inlet": "velocity-inlet", "outlet": "pressure-outlet",
+                       "walls": "wall"}
+    points = _hex_block_points(nx, ny, nz, Lx, Ly, Lz)
+    hex_conn = _hex_cells(nx, ny, nz) - 1
+    n_cells = hex_conn.shape[0]
+
+    # Unique faces, oriented outward from the first cell that lists
+    # them; ``refs[c]`` is the cell's list of (face, sign).
+    from of_mesh_converter.elements import cell_faces
+
+    face_index: dict[tuple[int, ...], int] = {}
+    faces: list[tuple[int, ...]] = []
+    users: list[list[int]] = []
+    refs: list[list[tuple[int, int]]] = []
+    for c, row in enumerate(hex_conn):
+        cell_refs = []
+        for f in cell_faces("HEXA_8", row):
+            key = tuple(sorted(f))
+            if key not in face_index:
+                face_index[key] = len(faces)
+                faces.append(f)
+                users.append([])
+                cell_refs.append((face_index[key], +1))
+            else:
+                cell_refs.append((face_index[key], -1))
+            users[face_index[key]].append(c)
+        refs.append(cell_refs)
+
+    flipped = set(range(0, len(faces), 3))
+    stored = [
+        (f[0], *reversed(f[1:])) if i in flipped else f for i, f in enumerate(faces)
+    ]
+
+    def zone_of(i: int) -> str:
+        if len(users[i]) == 2:
+            return "interior"
+        x = points[list(faces[i]), 0]
+        if np.allclose(x, 0.0):
+            return "inlet"
+        if np.allclose(x, Lx):
+            return "outlet"
+        return "walls"
+
+    zones = ["walls", "inlet", "outlet", "interior"]
+    by_zone = {z: [i for i in range(len(faces)) if zone_of(i) == z] for z in zones}
+
+    # Element ids: boundary zones first, then interior, then cells.
+    elem_id: dict[int, int] = {}
+    elements: list[CGNSNode] = []
+    bcs: list[CGNSNode] = []
+    next_id = 1
+    for z in zones:
+        ids = by_zone[z]
+        for k, i in enumerate(ids):
+            elem_id[i] = next_id + k
+        sec_name = "fluid-IF" if z == "interior" else f"{z}-Pg"
+        elements.append(_poly_elements_node(
+            sec_name, "NGON_n", next_id,
+            [[v + 1 for v in stored[i]] for i in ids], legacy=legacy,
+        ))
+        if z != "interior":
+            bc_type = "BCWall" if z == "walls" else (
+                "BCInflow" if z == "inlet" else "BCOutflow")
+            bcs.append(CGNSNode(
+                name=f"{z}-{bc_suffixes[z]}",
+                label="BC_t",
+                data=char_array(bc_type),
+                children=[
+                    CGNSNode(name="PointList", label="IndexArray_t",
+                             data=np.array([[elem_id[i]] for i in ids],
+                                           dtype=np.int64)),
+                    CGNSNode(name="GridLocation", label="GridLocation_t",
+                             data=char_array("FaceCenter")),
+                ],
+            ))
+        next_id += len(ids)
+
+    cell_first = next_id
+    nface = []
+    for cell_refs in refs:
+        nface.append([
+            s * (-1 if i in flipped else 1) * elem_id[i] for i, s in cell_refs
+        ])
+    elements.append(_poly_elements_node(
+        "fluid-Ph", "NFACE_n", cell_first, nface, legacy=legacy,
+    ))
+    n_elements = cell_first + n_cells - 1
+
+    G = np.arange(1, n_cells + 1, dtype=np.float64) * 10.0
+    G_by_elem = np.zeros(n_elements)
+    G_by_elem[:len(faces)] = -1.0  # face values Fluent also writes
+    G_by_elem[cell_first - 1:] = G
+
+    flow = CGNSNode(
+        name="FlowSolution.E:1",
+        label="FlowSolution_t",
+        children=[
+            CGNSNode(name="GridLocation", label="GridLocation_t",
+                     data=char_array("CellCenter")),
+            _data_array("Incident_Radiation", G_by_elem),
+        ],
+    )
+    zone = _zone("Zone", points, elements=elements,
+                 zone_bc=CGNSNode(name="ZoneBC", label="ZoneBC_t", children=bcs),
+                 flow_solution=flow)
+    zone.data = np.array([[points.shape[0], n_elements, 0]], dtype=np.int64)
+    write_cgns_file(out_path, _root("Base", zone))
+
+    return {
+        "n_cells": n_cells,
+        "n_faces": len(faces),
+        "n_internal_faces": len(by_zone["interior"]),
+        "hex_conn": hex_conn,
+        "points": points,
+        "patch_sizes": {z: len(by_zone[z]) for z in zones if z != "interior"},
+        "G": G,
+    }
