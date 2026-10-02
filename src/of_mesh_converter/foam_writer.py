@@ -191,21 +191,7 @@ def _write_scalar_field(name: str, arr: np.ndarray, mesh: Mesh, path: Path) -> N
             f"Scalar field {name!r} has {arr.shape[0]} values but mesh "
             f"has {mesh.n_cells} cells"
         )
-    dims = _format_dimensions(name)
-    lines = [_header("volScalarField", "0", name), ""]
-    lines.append(f"dimensions      {dims};")
-    lines.append("")
-    lines.append(f"internalField   nonuniform List<scalar>")
-    lines.append(f"{arr.shape[0]}")
-    lines.append("(")
-    lines.extend(map(repr, np.asarray(arr, dtype=np.float64).tolist()))
-    lines.append(")")
-    lines.append(";")
-    lines.append("")
-    lines.extend(_patch_bc_block(mesh))
-    lines.append("")
-    lines.append(_FOOTER)
-    path.write_text("\n".join(lines))
+    write_field_file(path, name, arr, _patch_bc_block(mesh), location="0")
 
 
 def _write_vector_field(name: str, arr: np.ndarray, mesh: Mesh, path: Path) -> None:
@@ -214,24 +200,40 @@ def _write_vector_field(name: str, arr: np.ndarray, mesh: Mesh, path: Path) -> N
             f"Vector field {name!r} has shape {arr.shape} but mesh has "
             f"{mesh.n_cells} cells (expected ({mesh.n_cells}, 3))"
         )
-    dims = _format_dimensions(name)
-    lines = [_header("volVectorField", "0", name), ""]
-    lines.append(f"dimensions      {dims};")
-    lines.append("")
-    lines.append("internalField   nonuniform List<vector>")
-    lines.append(f"{arr.shape[0]}")
-    lines.append("(")
-    lines.extend(
-        f"({x!r} {y!r} {z!r})"
-        for x, y, z in np.asarray(arr, dtype=np.float64).tolist()
-    )
-    lines.append(")")
-    lines.append(";")
-    lines.append("")
-    lines.extend(_patch_bc_block(mesh))
-    lines.append("")
-    lines.append(_FOOTER)
-    path.write_text("\n".join(lines))
+    write_field_file(path, name, arr, _patch_bc_block(mesh), location="0")
+
+
+def write_field_file(
+    path: Path,
+    name: str,
+    arr: np.ndarray,
+    boundary_field: list[str],
+    *,
+    location: str,
+) -> None:
+    """Write a ``volScalarField`` ((n,) array) or ``volVectorField``
+    ((n, 3) array) with a nonuniform internal field. ``boundary_field``
+    is the complete ``boundaryField { ... }`` block, one line per item."""
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.ndim == 1:
+        cls, kind = "volScalarField", "scalar"
+        entries = map(repr, arr.tolist())
+    elif arr.ndim == 2 and arr.shape[1] == 3:
+        cls, kind = "volVectorField", "vector"
+        entries = (f"({x!r} {y!r} {z!r})" for x, y, z in arr.tolist())
+    else:
+        raise ValueError(f"Field {name!r}: unsupported shape {arr.shape}")
+    with open(path, "w") as fh:
+        fh.write(_header(cls, location, name))
+        fh.write(f"\ndimensions      {_format_dimensions(name)};\n\n")
+        fh.write(f"internalField   nonuniform List<{kind}>\n{arr.shape[0]}\n(\n")
+        for line in entries:
+            fh.write(line)
+            fh.write("\n")
+        fh.write(")\n;\n\n")
+        fh.write("\n".join(boundary_field))
+        fh.write("\n\n")
+        fh.write(_FOOTER)
 
 
 # ---------------------------------------------------------------------------

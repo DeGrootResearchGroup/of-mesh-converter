@@ -18,8 +18,10 @@ v1, in active development. CI runs on synthetic CGNS, including a
 polyhedral file in the layout Fluent writes. One real Fluent export
 has been converted and checked: the Sozzi & Taghipour reactor on a
 1.23M-cell polyhedral mesh (DO incident radiation only, no flow),
-which `checkMesh` passes and whose cells match the OpenFOAM mesh it
-was made from to within 1 nm. That export carried no `U`, `k` or
+which `checkMesh` passes. `transfer` put its fluence rate into the
+OpenFOAM case the mesh came from (every cell matched to 1e-15 m),
+and the dose tracker gave 49.09 mJ/cm² mean dose against 49.16 for
+OpenFOAM's own DO at the same 72 directions. That export carried no `U`, `k` or
 `epsilon`, so the flow-field path is still untested on real Fluent
 output (see CLAUDE.md "Validation").
 
@@ -66,6 +68,38 @@ Once those are filled in, run from `case_dir`:
 ```bash
 foamPostProcess -dict system/postProcess.dict -latestTime
 ```
+
+## Copying fields into an existing OpenFOAM case (`transfer`)
+
+If the Fluent solve ran on the *same mesh* as an OpenFOAM case you
+already have (for instance a mesh exported from OpenFOAM to Fluent),
+you can put Fluent's fields straight into that case instead of
+building a new one. The typical use is a like-for-like comparison:
+keep the OpenFOAM flow and swap in Fluent's DO fluence rate, so the
+dose tracker sees exactly one thing change.
+
+```bash
+# In the OpenFOAM case: write the cell centres the matching uses.
+foamPostProcess -func writeCellCentres -time 2059
+
+# Copy G from the CGNS file into 2059/.
+of-mesh-converter transfer path/to/case.cgns path/to/of_case --time 2059 --fields G
+```
+
+Fluent renumbers cells, so fields are matched by cell centre, not
+copied by index. Nothing is interpolated: the command refuses to
+write anything unless every cell of the target has a CGNS cell within
+`--tolerance` (default 1e-3) of its size, `V^(1/3)`, and the pairing
+is one to one. For meshes that differ, use OpenFOAM's `mapFields`.
+
+- `--time` defaults to the latest time directory; `--fields` to
+  every field in the CGNS file.
+- An existing field file is only replaced with `--overwrite`, and
+  then keeps its `boundaryField`. A new file gets `zeroGradient` on
+  ordinary patches and the patch's own type on constraint patches
+  (cyclic, non-conformal, processor, empty, ...).
+- `C` may be ASCII or binary. The report (also saved as
+  `transfer_report.txt` in the case) gives the worst match distance.
 
 ## Inputs the converter understands
 
