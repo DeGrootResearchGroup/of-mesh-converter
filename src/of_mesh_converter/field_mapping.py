@@ -20,6 +20,9 @@ SCALAR_FIELD_MAP: dict[str, str] = {
     "TurbulentDissipationRate": "epsilon",
     "FluenceRate": "G",  # not CGNS-canonical; allow direct match
     "G": "G",
+    # Fluent's name for the DO / P1 incident radiation, int I dOmega
+    # (W/m^2): the fluence rate.
+    "Incident_Radiation": "G",
 }
 
 # Vector fields: a vector field in CGNS is stored as three scalar

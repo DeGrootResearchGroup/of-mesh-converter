@@ -14,9 +14,16 @@ already validated."
 
 ## Status
 
-v1, in active development. Works on synthetic Fluent-layout CGNS in
-the CI test suite; not yet validated against a real Fluent export
-(tier 2 / tier 3 validation is partner-dependent — see CLAUDE.md).
+v1, in active development. CI runs on synthetic CGNS, including a
+polyhedral file in the layout Fluent writes. One real Fluent export
+has been converted and checked: the Sozzi & Taghipour reactor on a
+1.23M-cell polyhedral mesh (DO incident radiation only, no flow),
+which `checkMesh` passes. `transfer` put its fluence rate into the
+OpenFOAM case the mesh came from (every cell matched to 1e-15 m),
+and the dose tracker gave 49.09 mJ/cm² mean dose against 49.16 for
+OpenFOAM's own DO at the same 72 directions. That export carried no `U`, `k` or
+`epsilon`, so the flow-field path is still untested on real Fluent
+output (see CLAUDE.md "Validation").
 
 ## Quick start
 
@@ -62,21 +69,72 @@ Once those are filled in, run from `case_dir`:
 foamPostProcess -dict system/postProcess.dict -latestTime
 ```
 
+## Copying fields into an existing OpenFOAM case (`transfer`)
+
+If the Fluent solve ran on the *same mesh* as an OpenFOAM case you
+already have (for instance a mesh exported from OpenFOAM to Fluent),
+you can put Fluent's fields straight into that case instead of
+building a new one. The typical use is a like-for-like comparison:
+keep the OpenFOAM flow and swap in Fluent's DO fluence rate, so the
+dose tracker sees exactly one thing change.
+
+```bash
+# In the OpenFOAM case: write the cell centres the matching uses.
+foamPostProcess -func writeCellCentres -time 2059
+
+# Copy G from the CGNS file into 2059/.
+of-mesh-converter transfer path/to/case.cgns path/to/of_case --time 2059 --fields G
+```
+
+Fluent renumbers cells, so fields are matched by cell centre, not
+copied by index. Nothing is interpolated: the command refuses to
+write anything unless every cell of the target has a CGNS cell within
+`--tolerance` (default 1e-3) of its size, `V^(1/3)`, and the pairing
+is one to one. For meshes that differ, use OpenFOAM's `mapFields`.
+
+- `--time` defaults to the latest time directory; `--fields` to
+  every field in the CGNS file.
+- An existing field file is only replaced with `--overwrite`, and
+  then keeps its `boundaryField`. A new file gets `zeroGradient` on
+  ordinary patches and the patch's own type on constraint patches
+  (cyclic, non-conformal, processor, empty, ...).
+- `C` may be ASCII or binary. The report (also saved as
+  `transfer_report.txt` in the case) gives the worst match distance.
+
 ## Inputs the converter understands
 
 - **Mesh**: a single CGNS file with one `CGNSBase_t` and one
-  unstructured `Zone_t`. Linear standard elements only: `TETRA_4`,
-  `HEXA_8`, `PENTA_6` (wedge), `PYRA_5` (pyramid). Polyhedral
-  (`NGON_n` / `NFACE_n`) is **not yet supported** — the reader
-  raises a clear `NotImplementedError`; polyhedra are the main v2
-  work item (see CLAUDE.md "Open questions").
+  unstructured `Zone_t`, holding either
+  - polyhedral cells: `NGON_n` faces plus `NFACE_n` cells, which is
+    what Fluent writes for poly and poly-hex meshes. Both the CGNS
+    4.x layout (`ElementStartOffset`) and the CGNS 3.x layout
+    (length-prefixed entries) are read; or
+  - linear standard elements: `TETRA_4`, `HEXA_8`, `PENTA_6`
+    (wedge), `PYRA_5` (pyramid), with `TRI_3` / `QUAD_4` boundary
+    sections.
+
+  A zone mixing the two is rejected.
 - **Boundary conditions**: each CGNS `BC_t` becomes one OpenFOAM
   patch. `BCWall*` types become OF `wall` patches; everything else
   becomes a generic `patch`. The dose tracker only reads patch
   *names* (for `escapePatches`, `seedingPatches`), so BC type
-  fidelity beyond `wall` vs `patch` is not load-bearing.
+  fidelity beyond `wall` vs `patch` is not load-bearing. A BC's
+  name is its `FamilyName` if it has one; Fluent writes none and
+  names BCs `<zone>-<zone type>` (`lamp0_wall-wall`), so the
+  converter takes the zone name from the BC's face section
+  (`lamp0_wall-Pg`) instead. Fluent lower-cases zone names on
+  export, which the converter cannot undo.
+- **Mesh interfaces**: Fluent exports interface zones (non-conformal
+  seams) as `BCWall`. They become uncoupled patches, and the report
+  lists them: couple them in OpenFOAM before tracking on the
+  converted mesh, or map the fields onto a coupled OpenFOAM case.
 - **Fields**: cell-centred `VelocityX/Y/Z`, `TurbulentEnergyKinetic`,
-  `TurbulentDissipationRate`, optional `FluenceRate` or `G`.
+  `TurbulentDissipationRate`, optional `Incident_Radiation`
+  (Fluent's DO / P1 name), `FluenceRate` or `G`, all mapped to OF
+  `U`, `k`, `epsilon`, `G`. Fluent sizes solution arrays by the
+  zone's element count (faces plus cells) and indexes them by
+  element id; the reader takes the cell slice and says so in the
+  report. Arrays with one value per cell are read as they are.
   Anything else in the `FlowSolution_t` is ignored. Turbulence
   models other than k-ε (k-ω SST, RSM, ...) export different
   fields and are currently rejected — `radiationDose`'s

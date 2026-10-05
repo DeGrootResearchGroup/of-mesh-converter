@@ -55,15 +55,6 @@ def _header(cls: str, loc: str, obj: str) -> str:
     return _HEADER.format(cls=cls, loc=loc, obj=obj)
 
 
-def _format_vector(v: np.ndarray) -> str:
-    return f"({float(v[0])} {float(v[1])} {float(v[2])})"
-
-
-def _format_face(verts: list[int]) -> str:
-    inner = " ".join(str(int(x)) for x in verts)
-    return f"{len(verts)}({inner})"
-
-
 def _format_dimensions(of_name: str) -> str:
     if of_name not in OF_DIMENSIONS:
         raise KeyError(f"No dimension set defined for field {of_name!r}")
@@ -99,44 +90,56 @@ def write_mesh(mesh: Mesh, out_dir: Path | str) -> None:
     _write_boundary(mesh, pm / "boundary")
 
 
+def _write_list(path: Path, header: str, lines, n: int, note: str | None = None) -> None:
+    """Stream an OpenFOAM ASCII list: header, count, one entry per
+    line. ``lines`` is any iterable of preformatted entries."""
+    with open(path, "w") as fh:
+        fh.write(header)
+        fh.write("\n")
+        if note is not None:
+            fh.write(f"// {note}\n")
+        fh.write(f"{n}\n(\n")
+        for line in lines:
+            fh.write(line)
+            fh.write("\n")
+        fh.write(")\n\n")
+        fh.write(_FOOTER)
+
+
 def _write_points(mesh: Mesh, path: Path) -> None:
-    n = len(mesh.points)
-    lines = [_header("vectorField", "constant/polyMesh", "points"), ""]
-    lines.append(f"{n}")
-    lines.append("(")
-    for p in mesh.points:
-        lines.append(_format_vector(p))
-    lines.append(")")
-    lines.append("")
-    lines.append(_FOOTER)
-    path.write_text("\n".join(lines))
+    _write_list(
+        path,
+        _header("vectorField", "constant/polyMesh", "points"),
+        (f"({x!r} {y!r} {z!r})" for x, y, z in mesh.points.tolist()),
+        len(mesh.points),
+    )
 
 
 def _write_faces(mesh: Mesh, path: Path) -> None:
-    n = len(mesh.faces)
-    lines = [_header("faceList", "constant/polyMesh", "faces"), ""]
-    lines.append(f"{n}")
-    lines.append("(")
-    for face in mesh.faces:
-        lines.append(_format_face(face))
-    lines.append(")")
-    lines.append("")
-    lines.append(_FOOTER)
-    path.write_text("\n".join(lines))
+    verts = mesh.face_vertices.tolist()
+    offs = mesh.face_offsets.tolist()
+
+    def lines():
+        for i in range(len(offs) - 1):
+            face = verts[offs[i]:offs[i + 1]]
+            yield f"{len(face)}({' '.join(map(str, face))})"
+
+    _write_list(
+        path,
+        _header("faceList", "constant/polyMesh", "faces"),
+        lines(),
+        mesh.n_faces,
+    )
 
 
 def _write_labels(arr: np.ndarray, path: Path, obj: str, note: str) -> None:
-    n = int(arr.shape[0])
-    lines = [_header("labelList", "constant/polyMesh", obj), ""]
-    lines.append(f"// {note}")
-    lines.append(f"{n}")
-    lines.append("(")
-    for x in arr:
-        lines.append(str(int(x)))
-    lines.append(")")
-    lines.append("")
-    lines.append(_FOOTER)
-    path.write_text("\n".join(lines))
+    _write_list(
+        path,
+        _header("labelList", "constant/polyMesh", obj),
+        map(str, np.asarray(arr).tolist()),
+        int(arr.shape[0]),
+        note=note,
+    )
 
 
 def _write_boundary(mesh: Mesh, path: Path) -> None:
@@ -188,22 +191,7 @@ def _write_scalar_field(name: str, arr: np.ndarray, mesh: Mesh, path: Path) -> N
             f"Scalar field {name!r} has {arr.shape[0]} values but mesh "
             f"has {mesh.n_cells} cells"
         )
-    dims = _format_dimensions(name)
-    lines = [_header("volScalarField", "0", name), ""]
-    lines.append(f"dimensions      {dims};")
-    lines.append("")
-    lines.append(f"internalField   nonuniform List<scalar>")
-    lines.append(f"{arr.shape[0]}")
-    lines.append("(")
-    for v in arr:
-        lines.append(repr(float(v)))
-    lines.append(")")
-    lines.append(";")
-    lines.append("")
-    lines.extend(_patch_bc_block(mesh))
-    lines.append("")
-    lines.append(_FOOTER)
-    path.write_text("\n".join(lines))
+    write_field_file(path, name, arr, _patch_bc_block(mesh), location="0")
 
 
 def _write_vector_field(name: str, arr: np.ndarray, mesh: Mesh, path: Path) -> None:
@@ -212,22 +200,40 @@ def _write_vector_field(name: str, arr: np.ndarray, mesh: Mesh, path: Path) -> N
             f"Vector field {name!r} has shape {arr.shape} but mesh has "
             f"{mesh.n_cells} cells (expected ({mesh.n_cells}, 3))"
         )
-    dims = _format_dimensions(name)
-    lines = [_header("volVectorField", "0", name), ""]
-    lines.append(f"dimensions      {dims};")
-    lines.append("")
-    lines.append("internalField   nonuniform List<vector>")
-    lines.append(f"{arr.shape[0]}")
-    lines.append("(")
-    for v in arr:
-        lines.append(_format_vector(v))
-    lines.append(")")
-    lines.append(";")
-    lines.append("")
-    lines.extend(_patch_bc_block(mesh))
-    lines.append("")
-    lines.append(_FOOTER)
-    path.write_text("\n".join(lines))
+    write_field_file(path, name, arr, _patch_bc_block(mesh), location="0")
+
+
+def write_field_file(
+    path: Path,
+    name: str,
+    arr: np.ndarray,
+    boundary_field: list[str],
+    *,
+    location: str,
+) -> None:
+    """Write a ``volScalarField`` ((n,) array) or ``volVectorField``
+    ((n, 3) array) with a nonuniform internal field. ``boundary_field``
+    is the complete ``boundaryField { ... }`` block, one line per item."""
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.ndim == 1:
+        cls, kind = "volScalarField", "scalar"
+        entries = map(repr, arr.tolist())
+    elif arr.ndim == 2 and arr.shape[1] == 3:
+        cls, kind = "volVectorField", "vector"
+        entries = (f"({x!r} {y!r} {z!r})" for x, y, z in arr.tolist())
+    else:
+        raise ValueError(f"Field {name!r}: unsupported shape {arr.shape}")
+    with open(path, "w") as fh:
+        fh.write(_header(cls, location, name))
+        fh.write(f"\ndimensions      {_format_dimensions(name)};\n\n")
+        fh.write(f"internalField   nonuniform List<{kind}>\n{arr.shape[0]}\n(\n")
+        for line in entries:
+            fh.write(line)
+            fh.write("\n")
+        fh.write(")\n;\n\n")
+        fh.write("\n".join(boundary_field))
+        fh.write("\n\n")
+        fh.write(_FOOTER)
 
 
 # ---------------------------------------------------------------------------

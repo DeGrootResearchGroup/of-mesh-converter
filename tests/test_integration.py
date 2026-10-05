@@ -138,9 +138,10 @@ def test_cli_invocation(tmp_path):
     assert (case_dir / "constant" / "polyMesh" / "boundary").exists()
 
 
-def test_cli_reports_unsupported_polyhedral_clearly(tmp_path):
+def test_cli_reports_malformed_polyhedral_clearly(tmp_path, capsys):
     """The CLI must exit non-zero with a clear message when handed a
-    polyhedral CGNS file."""
+    polyhedral section it cannot make sense of (here an NGON_n with
+    no ElementStartOffset and a truncated payload)."""
     from of_mesh_converter.__main__ import main
     from of_mesh_converter._cgns_hdf5 import (
         CGNSNode,
@@ -185,3 +186,4 @@ def test_cli_reports_unsupported_polyhedral_clearly(tmp_path):
 
     rc = main([str(p), str(tmp_path / "out")])
     assert rc == 1
+    assert "Faces" in capsys.readouterr().err

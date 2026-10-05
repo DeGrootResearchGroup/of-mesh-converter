@@ -124,11 +124,15 @@ of-mesh-converter/
     field_mapping.py              # CGNS quantity-name → OF field-name dict
     sanitise.py                   # patch-name fixups, k/eps clipping
     sanity_report.py              # printed audit at end of run
+    geometry.py                   # OF-style face/cell centres and volumes
+    transfer.py                   # `transfer`: CGNS fields into an
+                                  #   existing OF case on the same mesh
   tests/
     test_elements.py              # connectivity tables vs CGNS spec
     test_field_mapping.py         # name mapping round-trip
     test_self_roundtrip.py        # of-optical-radiation doseSmokeBox → CGNS → back
     test_synthetic_fluent.py      # hand-built CGNS matching Fluent layout
+                                  #   (as built: test_polyhedral.py)
     fixtures/
       doseSmokeBox.cgns           # generated, gitignored if large
 ```
@@ -230,6 +234,27 @@ load-bearing for the "fresh Python, don't port existing C++" call.
 - Patch name preservation (with documented sanitisation).
 - One self-roundtrip CI test and one synthetic-Fluent-layout test.
 
+- `transfer`: copying CGNS fields into an existing OpenFOAM case on
+  the *same* mesh, matched by cell centre (see below).
+
+### `transfer`: same mesh only, by design
+
+Added 2026-10-02 for Tier 3: the cleanest Fluent-vs-OpenFOAM
+comparison runs Fluent on the mesh of an OpenFOAM case and swaps in
+only Fluent's fluence rate, so the flow and the particle paths stay
+the same. Fluent renumbers cells, so `transfer` matches them by
+centre: source centres from `geometry.py` (OpenFOAM's definitions),
+target centres from the case's `C` field (`writeCellCentres`, ASCII
+or binary), so we never read an OF polyMesh. Nearest neighbours come
+from a hash of cubes no smaller than the tolerance, searched over 27
+cubes — numpy only, no scipy.
+
+It must stay a copy. It refuses unless the cell counts agree, every
+target cell has a source cell within `tolerance × V^(1/3)`, and the
+pairing is one to one; a wrong pairing would scramble G while
+giving a plausible-looking dose. Interpolating between different
+meshes is `mapFields`' job; do not add it here.
+
 ### Explicitly out of scope
 
 - Direct `.cas` / `.dat` binary parsing. CGNS only. Users export
@@ -246,6 +271,7 @@ load-bearing for the "fresh Python, don't port existing C++" call.
   doing it pre-emptively is feature-creep.
 - General-purpose Fluent → OF conversion. Every BC type mapping
   beyond what the dose tracker needs is a year of edge cases.
+- Interpolating fields between different meshes (`mapFields` does it).
 
 ## Validation
 
@@ -286,6 +312,33 @@ This is the test that proves we can read what Fluent actually emits,
 distinct from what the CGNS spec allows in theory. Build it from
 real exports the engineer can provide.
 
+`tests/cgns_fixture.py::poly_box_cgns` reproduces the layout of the
+first real export (below), on a small hex box, and
+`tests/test_polyhedral.py` checks it against the standard-element
+path. The plug-flow dose assertion is not there yet.
+
+**Fluent CGNS layout, as observed** (Sozzi on the uvmesh mesh, DO
+only, CGNS library 4.3, 2026-10-02):
+
+- One base, one unstructured zone. Every face is in an `NGON_n`
+  section with `ElementStartOffset`: one `<zone>-Pg` section per
+  boundary zone, then one `<cellzone>-IF` interior section; the
+  cells are one `NFACE_n` section `<cellzone>-Ph`. Element ids run
+  boundary faces, interior faces, cells.
+- `NFACE_n` signs: positive means the face's right-hand normal
+  points out of the cell. Every boundary face is referenced
+  positively; every interior face once with each sign.
+- `ZoneBC` holds one `BC_t` per boundary zone, named
+  `<zone>-<zone type>` (`inlet-velocity-inlet`, `lamp0_wall-wall`),
+  with a `PointList` of face element ids and no `FamilyName`. Zone
+  names are lower-cased. Interface zones are written as `BCWall`.
+- `Zone_t` gives the cell count as the total element count, and the
+  `FlowSolution_t` (`CellCenter`) arrays have that length, indexed
+  by element id: cell values at the `NFACE_n` ids, boundary-face
+  values at the boundary face ids, zeros for interior faces. The
+  solution also carries `CoordinateX/Y/Z` (cell centroids) and
+  `Cell_Volume`. DO incident radiation is `Incident_Radiation`.
+
 ### Tier 3 — Sozzi-in-Fluent
 
 Partner with a Fluent user (the engineer driving this scoping
@@ -299,13 +352,28 @@ This is the artefact for QA leads — the answer to "I have a Fluent
 result, does this thing give me a sensible dose?" Out-of-band from
 CI; depends on Fluent licence access and partner availability.
 
+**First result (2026-10-02, IUVA 2026 deck, slide 10).** Fluent DO
+(3 × 3 divisions per octant = 72 directions) on the uvmesh Sozzi
+mesh, exported to CGNS with `Incident_Radiation` only. `transfer`
+put G into the OpenFOAM k-ω SST case on that mesh; `radiationDose`
+(of-optical-radiation `b23582b`, Langevin dispersion, 9,987
+particles, seed 42) gave a mean dose of 49.09 mJ/cm² and a log
+reduction of 1.474 at k = 0.1, against 49.16 / 1.475 for
+OpenFOAM's DO at 72 directions on the same flow and particles.
+Volume-averaged G differed by 0.16 %. Runs are in
+`~/aquaflux-runs/sozzi_sst_dose_2026-10-01/swap/fluent33`. The
+older reference numbers above are from the tutorial's
+snappyHexMesh mesh and a k-ε flow, not this case.
+
 ## Risks
 
 - **CGNS polyhedral storage (`NGON_n` / `NFACE_n`) is less mature in
-  tooling than tet/hex.** Fluent emits it but the indexing
-  conventions deserve a careful read against the CGNS SIDS before
-  any code lands. Cross-check against at least one real Fluent
-  export before declaring the reader done.
+  tooling than tet/hex.** The reader follows the CGNS SIDS and has
+  been checked against one real Fluent export (Tier 2 above): the
+  converted 1.23M-cell mesh passes `checkMesh`, and its cells match
+  the OpenFOAM mesh Fluent was given to within 1 nm. More exports
+  (other Fluent versions, mixed poly/standard zones, multiple cell
+  zones) would still be worth collecting.
 - **Patch-name collisions.** Fluent zone names like `interior-fluid`
   contain characters OF won't accept. We need a documented
   sanitisation rule (e.g. `[^a-zA-Z0-9_]` → `_`, leading-digit
